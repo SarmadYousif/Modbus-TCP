@@ -1,0 +1,252 @@
+#!/usr/bin/python
+from twisted.web import server, resource
+from twisted.internet import reactor, protocol,defer, task, endpoints
+from pymodbus.constants import Defaults
+from pymodbus.client.async import ModbusClientProtocol
+from time import sleep
+from twisted.web.template import Element, XMLString, renderer
+import struct
+from klein import Klein, route
+import json
+app = Klein()
+
+Receive = {}
+book = {'E1_Relay1': 0, 'E1_Relay2': 0, 'TCP_Timeout': 10, 'CM_01' : 0.1, 'CM_02' : 5 }
+
+class MyModbusClientProtocol(ModbusClientProtocol):
+
+    def connectionMade(self):
+        ModbusClientProtocol.connectionMade(self)
+        print ('E1 is Connected')
+        self.read()
+
+    def read(self):
+        self.timeout = reactor.callLater(book['TCP_Timeout'], self.transport.abortConnection)
+        rr = self.read_holding_registers(0, 1)               # ( Start Register , Number of Registers )
+        rr.addCallbacks(self.requestFetched, self.requestNotFetched)
+
+    def read2(self):
+        self.timeout = reactor.callLater(book['TCP_Timeout'], self.transport.abortConnection)
+        rr = self.read_holding_registers(1, 1)               # ( Start Register , Number of Registers )
+        rr.addCallbacks(self.requestFetched1, self.requestNotFetched)
+
+    def read_float(self):
+        self.timeout = reactor.callLater(book['TCP_Timeout'], self.transport.abortConnection)
+        rr = self.read_holding_registers(6, 4)               # ( Start Register , Number of Registers )
+        rr.addCallbacks(self.requestFetched_Float, self.requestNotFetched)
+
+    def read_float_1(self):
+        self.timeout = reactor.callLater(book['TCP_Timeout'], self.transport.abortConnection)
+        rr = self.read_holding_registers(2, 4)               # ( Start Register , Number of Registers )
+        rr.addCallbacks(self.requestFetched_Float1, self.requestNotFetched)
+
+    def write(self):
+        self.timeout = reactor.callLater(book['TCP_Timeout'], self.transport.abortConnection)
+        deferred = self.write_register(12, int(book['E1_Relay1']))               # ( Register Number , Value )
+        self.timeout.cancel()
+        reactor.callLater(0.1, self.read)
+
+    def write1(self):
+        self.timeout = reactor.callLater(5, self.transport.abortConnection)
+        deferred = self.write_register(16, int(book['E1_Relay2']))               # ( Register Number , Value )
+        self.timeout.cancel()
+        reactor.callLater(0, self.read2)
+
+    def requestNotFetched(self,error):
+        print (error)
+        sleep(0.5)
+
+    def requestFetched(self, response):
+        try:
+            book['E1_Random1'] = response.getRegister(0)
+            self.timeout.cancel()
+        except:
+            print("Fetched %d" % response.getBit(0))
+        self.factory.counter += 1
+        if self.factory.counter == 1:
+            self.factory.counter = 0
+            reactor.callLater(0, self.write1)
+
+    def requestFetched1(self, response):
+        try:
+            book['E1_Random2'] = response.getRegister(0)
+            self.timeout.cancel()
+        except:
+            print("Fetched %d" % response.getBit(0))
+        self.factory.counter += 1
+        if self.factory.counter == 1:
+            self.factory.counter = 0
+            reactor.callLater(0, self.read_float)
+
+
+    def requestFetched_Float(self, response):
+        try:
+            global Byte1, Byte2, Byte3, Byte4
+            Byte1 = response.getRegister(0)
+            Byte1 = Byte1 - 2 ** 16 if Byte1 & 2 ** 15 else Byte1
+            Byte2 = response.getRegister(1)
+            Byte2 = Byte2 - 2 ** 16 if Byte2 & 2 ** 15 else Byte2
+            Byte3 = response.getRegister(2)
+            Byte3 = Byte3 - 2 ** 16 if Byte3 & 2 ** 15 else Byte3
+            Byte4 = response.getRegister(3)
+            Byte4 = Byte4 - 2 ** 16 if Byte4 & 2 ** 15 else Byte4
+            data = [Byte1, Byte2, Byte3, Byte4]
+            book['Temperature'] = struct.unpack('<f', struct.pack('4b', *data))[0]
+            self.timeout.cancel()
+            #print(Value)
+        except:
+            print("Fetched %d" % response.getBit(0))
+        self.factory.counter += 1
+        if self.factory.counter == 1:
+            self.factory.counter = 0
+            reactor.callLater(0, self.read_float_1)
+
+    def requestFetched_Float1(self, response):
+        try:
+            global Byte1, Byte2, Byte3, Byte4
+            Byte1 = response.getRegister(0)
+            Byte1 = Byte1 - 2 ** 16 if Byte1 & 2 ** 15 else Byte1
+            Byte2 = response.getRegister(1)
+            Byte2 = Byte2 - 2 ** 16 if Byte2 & 2 ** 15 else Byte2
+            Byte3 = response.getRegister(2)
+            Byte3 = Byte3 - 2 ** 16 if Byte3 & 2 ** 15 else Byte3
+            Byte4 = response.getRegister(3)
+            Byte4 = Byte4 - 2 ** 16 if Byte4 & 2 ** 15 else Byte4
+            data = [Byte1, Byte2, Byte3, Byte4]
+            book['Humidity'] = struct.unpack('<f', struct.pack('4b', *data))[0]
+            self.timeout.cancel()
+        except:
+            print("Fetched %d" % response.getBit(0))
+        self.factory.counter += 1
+        if self.factory.counter == 1:
+            self.factory.counter = 0
+            reactor.callLater(0, self.write)
+
+class MyModbusClientFactory(protocol.ClientFactory):
+    """A factory.
+
+    A new protocol instance will be created each time we connect to the server.
+    """
+    def __init__(self):
+        self.counter = 0
+    def buildProtocol(self, addr):
+        p = MyModbusClientProtocol()
+        p.factory = self
+        return p
+    def clientConnectionLost(self, connector, reason):
+        print ("connection lost:", reason)
+        connector.connect()
+    def clientConnectionFailed(self, connector, reason):
+        print ("connection failed:", reason)
+        connector.connect()
+
+
+
+#------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------
+
+
+class MyModbusClientProtocol1(ModbusClientProtocol):
+
+    def connectionMade(self):
+        ModbusClientProtocol.connectionMade(self)
+        print ('E2 is Connected')
+        self.read()
+
+    def read(self):
+        self.timeout = reactor.callLater(book['TCP_Timeout'], self.transport.abortConnection)
+        deferred = self.read_holding_registers(0, 2)                          # ( Start Register , Number of Registers )
+        deferred.addCallbacks(self.requestFetched,self.requestNotFetched)
+
+    def requestNotFetched(self,error):
+        print (error)
+        sleep(0.5)
+
+    def requestFetched(self,response):
+        try:
+            book['E2_GP'] = response.getRegister(0)
+            book['E2_PP'] = response.getRegister(1)
+            self.timeout.cancel()
+        except:
+            print ("Fetched %d" % response.getBit(1))
+        self.factory.counter += 1
+        if self.factory.counter == 1:
+            self.factory.counter = 0
+        reactor.callLater(0,self.read)
+
+class MyModbusClientFactory1(protocol.ClientFactory):
+
+    def __init__(self):
+        self.counter = 0
+    def buildProtocol(self, addr):
+        p = MyModbusClientProtocol1()
+        p.factory = self
+        return p
+    def clientConnectionLost(self, connector, reason):
+        print ("connection lost:", reason)
+        connector.connect()
+    def clientConnectionFailed(self, connector, reason):
+        print ("connection failed:", reason)
+        connector.connect()
+
+
+
+class Process_Commands(Element):
+    loader = XMLString((
+        '<h1 '
+        'xmlns:t="http://twistedmatrix.com/ns/twisted.web.template/0.1"'
+        '>A Value of :  <span t:render="name"></span> !</h1>'))
+
+    def __init__(self, name):
+        self._name = name
+        Receive = json.loads(name)
+        print (Receive)
+        global book
+        for Commands in Receive:
+            print(Commands)
+            for each in book:
+               print(each)
+               if Commands == each:
+                    print (' from {}, {}'.format(Commands, each))
+                    print ('Write a value of {} to   {}'.format(book[each], Receive[Commands]))
+                    book[each] = Receive[Commands]
+                    break
+    @renderer
+    def name(self, request, tag):
+        return self._name
+@app.route('/')
+def Home_Page(request):
+   return json.dumps(book)
+
+@app.route('/Commands/<string:name>')
+def Request(request, name='world'):
+    return Process_Commands(name)
+
+
+class Intake:
+    def __init__(self):
+        self.lc = task.LoopingCall(self.CM_01)
+#        self.lm = task.LoopingCall(self.CM_02)
+#        self.lm.start(5)
+        self.lc.start(book['CM_01'])
+    def CM_01(self):
+        if 'E2_GP' in book:
+            book['E1_Relay1'] = book['E2_GP']
+        if 'E2_PP' in book:
+            book['E1_Relay2'] = book['E2_PP']
+    def CM_02(self):
+        if book['E1_Relay2'] == 0:
+            book['E1_Relay2'] = 1
+        else:
+            book['E1_Relay2'] = 0
+
+if __name__ == "__main__":
+    factoryinstance = MyModbusClientFactory()
+    factoryinstance1 = MyModbusClientFactory1()
+   # factoryinstance2 = MyModbusClientFactory()
+    reactor.connectTCP("192.168.6.151", 502, factoryinstance)
+    #reactor.connectTCP("192.168.5.109", 502, factoryinstance2)
+    reactor.connectTCP("192.168.6.152", 502, factoryinstance1)
+    r = Intake()
+    app.run(host='0.0.0.0', port= 5000)
